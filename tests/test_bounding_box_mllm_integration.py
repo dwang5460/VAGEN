@@ -25,7 +25,14 @@ import sys
 import os
 import argparse
 from pathlib import Path
-os.environ["OPENROUTER_API_KEY"] = "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"
+from dotenv import load_dotenv
+
+load_dotenv()
+
+if not os.getenv("OPENROUTER_API_KEY"):
+    print(" Warning: OPENROUTER_API_KEY not found")
+    print(" Please ensure .env file exists and contains the correct API Key")
+    sys.exit(1)
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
