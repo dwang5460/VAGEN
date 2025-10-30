@@ -21,11 +21,6 @@ A bounding box is defined by four normalized coordinates: [x_min, y_min, x_max, 
 - BBox[x_min, y_min, x_max, y_max]: Define a bounding box
   Example: BBox[0.1, 0.2, 0.9, 0.8]
 
-**Evaluation Criteria:**
-Your bounding box will be scored based on IoU (Intersection over Union) with the ground truth:
-- IoU >= 0.5: Success
-- IoU < 0.5: Needs improvement
-
 **Important Notes:**
 1. Carefully observe the axes, title, and legend positions in the chart
 2. The bounding box should tightly frame the main plot area, excluding axis labels and title

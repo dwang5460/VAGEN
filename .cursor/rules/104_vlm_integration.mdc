@@ -1,0 +1,427 @@
+---
+description: Integration with VLM rollout managers and Visual Reasoning RL
+globs: vagen/rollout/**/*.py,vagen/env/**/env.py
+alwaysApply: false
+---
+
+# VLM Integration & Rollout Rules
+
+## Critical Reading
+MUST study before integration: @vagen/rollout/qwen_rollout/rollout_manager.py
+
+## Observation Format for VLMs
+
+### Standard Format
+```python
+def get_observation(self) -> dict:
+    """Return VLM-compatible observation.
+    
+    Returns:
+        dict with required keys:
+            - image: Visual observation (np.ndarray or PIL.Image)
+            - text: Optional text prompt/description
+            - state_info: Dict for reasoning prompts
+    """
+    return {
+        'image': self._render_current_state(),
+        'text': self._get_instruction_text(),
+        'state_info': {
+            'current_state': self._get_state_description(),
+            'available_actions': self._get_valid_actions(),
+            'task_context': self._get_task_context()
+        }
+    }
+```
+
+### Image Specifications
+```python
+# Image format requirements
+image = self._render()
+assert isinstance(image, (np.ndarray, PIL.Image.Image))
+if isinstance(image, np.ndarray):
+    assert image.dtype == np.uint8
+    assert image.shape == (H, W, 3)  # RGB
+    assert 0 <= image.min() and image.max() <= 255
+```
+
+## Action Parsing from VLM Tokens
+
+### Robust Parsing
+```python
+def parse_action(self, vlm_output: str) -> str:
+    """Parse VLM token output to environment action.
+    
+    VLM outputs may include:
+    - Reasoning text before action
+    - Multiple formats/phrasings
+    - Extra whitespace or punctuation
+    
+    Args:
+        vlm_output: Raw text from VLM
+        
+    Returns:
+        Validated action string
+        
+    Raises:
+        ValueError: If no valid action found
+    """
+    # Clean output
+    output = vlm_output.strip().lower()
+    
+    # Try exact match first
+    if output in self.VALID_ACTIONS:
+        return output
+    
+    # Try pattern matching
+    for pattern, action in self.ACTION_PATTERNS.items():
+        if re.search(pattern, output):
+            return action
+    
+    # Try fuzzy matching
+    best_match = self._fuzzy_match(output, self.VALID_ACTIONS)
+    if best_match and self._match_confidence(output, best_match) > 0.8:
+        logger.info(f"Fuzzy matched '{output}' to '{best_match}'")
+        return best_match
+    
+    # If all else fails
+    raise ValueError(
+        f"Cannot parse action from: {vlm_output}\n"
+        f"Valid actions: {self.VALID_ACTIONS}\n"
+        f"Expected format: {self._get_action_format()}"
+    )
+
+# Define action patterns
+ACTION_PATTERNS = {
+    r'move\s+(?:to\s+)?left': 'left',
+    r'go\s+left': 'left',
+    r'turn\s+left': 'left',
+    # ... more patterns
+}
+```
+
+## Visual Reasoning Support
+
+### State Description for Grounding
+```python
+def get_state_description(self) -> str:
+    """Generate textual state description for grounding.
+    
+    Used by VAGEN for visual reasoning prompts.
+    Should describe current state clearly and concisely.
+    
+    Returns:
+        Human-readable state description
+    """
+    description_parts = []
+    
+    # Agent position/status
+    description_parts.append(
+        f"Agent is at position ({self.agent_x}, {self.agent_y})"
+    )
+    
+    # Nearby objects
+    nearby = self._get_nearby_objects()
+    if nearby:
+        description_parts.append(
+            f"Nearby objects: {', '.join(nearby)}"
+        )
+    
+    # Task progress
+    description_parts.append(
+        f"Task progress: {self.completed_goals}/{self.total_goals}"
+    )
+    
+    return ". ".join(description_parts) + "."
+```
+
+### World Model Prediction Support
+```python
+def get_predicted_next_state_description(
+    self,
+    action: str
+) -> str:
+    """Predict next state description for world modeling.
+    
+    Used by VAGEN-Full for world modeling reasoning.
+    
+    Args:
+        action: Proposed action
+        
+    Returns:
+        Predicted state description after action
+    """
+    # Simulate action (without applying)
+    predicted_state = self._simulate_action(action)
+    
+    # Generate description of predicted state
+    return self._state_to_description(predicted_state)
+
+def _simulate_action(self, action: str) -> dict:
+    """Simulate action without changing environment state."""
+    # Create copy of current state
+    sim_state = self._copy_state()
+    
+    # Apply action to copy
+    self._apply_action_to_state(sim_state, action)
+    
+    return sim_state
+```
+
+## Turn-Level Reward Calculation
+
+### Bi-Level GAE Support
+```python
+class TurnLevelRewardCalculator:
+    """Calculate turn-level rewards for Bi-Level GAE.
+    
+    Turn-level rewards are applied at interaction boundaries
+    and used alongside token-level rewards.
+    """
+    
+    def calculate_turn_reward(
+        self,
+        trajectory: list[dict]
+    ) -> float:
+        """Calculate reward for entire turn.
+        
+        Args:
+            trajectory: List of steps in this turn
+            
+        Returns:
+            Turn-level reward
+        """
+        # Aggregate step rewards
+        step_rewards = [step['reward'] for step in trajectory]
+        base_reward = sum(step_rewards)
+        
+        # Add turn-level bonuses
+        if self._achieved_subgoal(trajectory):
+            base_reward += self.subgoal_bonus
+        
+        if self._efficient_trajectory(trajectory):
+            base_reward += self.efficiency_bonus
+        
+        return base_reward
+```
+
+### Visual Reasoning Reward (VAGEN-Full)
+```python
+def calculate_reasoning_reward(
+    self,
+    predicted_state: str,
+    actual_state: str,
+    use_llm_judge: bool = True
+) -> float:
+    """Calculate reward for visual reasoning accuracy.
+    
+    Used by VAGEN-Full to reward accurate state prediction.
+    
+    Args:
+        predicted_state: VLM's predicted state description
+        actual_state: Ground truth state description
+        use_llm_judge: Use LLM-as-Judge for scoring
+        
+    Returns:
+        Reasoning reward in [0, 1]
+    """
+    if not use_llm_judge:
+        # Simple string similarity
+        return self._string_similarity(predicted_state, actual_state)
+    
+    # Use LLM to judge prediction accuracy
+    judge_prompt = f"""
+    Evaluate how well the predicted state matches the actual state.
+    
+    Predicted State: {predicted_state}
+    Actual State: {actual_state}
+    
+    Score the prediction accuracy from 0 (completely wrong) to 1 (perfect match).
+    Focus on:
+    - Key object positions
+    - Task-relevant details
+    - Action feasibility
+    
+    Return only a single number between 0 and 1.
+    """
+    
+    score = self._query_llm_judge(judge_prompt)
+    return float(score)
+
+def _query_llm_judge(self, prompt: str) -> float:
+    """Query LLM judge for reasoning reward.
+    
+    Requires OPENAI_API_KEY environment variable.
+    """
+    import openai
+    
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.0,
+        max_tokens=10
+    )
+    
+    score_text = response.choices[0].message.content.strip()
+    try:
+        return float(score_text)
+    except ValueError:
+        logger.error(f"Invalid LLM judge response: {score_text}")
+        return 0.0
+```
+
+## Selective Token Masking
+
+### Loss Masking
+```python
+def get_loss_mask(self, trajectory: dict) -> np.ndarray:
+    """Generate loss mask for selective optimization.
+    
+    Focuses optimization on action-critical tokens.
+    
+    Args:
+        trajectory: Full trajectory dict with token information
+        
+    Returns:
+        Binary mask for loss calculation
+    """
+    mask = np.zeros(len(trajectory['tokens']), dtype=bool)
+    
+    # Mask action tokens
+    action_start = trajectory['action_token_start']
+    action_end = trajectory['action_token_end']
+    mask[action_start:action_end] = True
+    
+    # Optionally mask reasoning tokens
+    if self.config.mask_reasoning:
+        reasoning_start = trajectory['reasoning_token_start']
+        reasoning_end = trajectory['reasoning_token_end']
+        mask[reasoning_start:reasoning_end] = True
+    
+    return mask
+```
+
+### Advantage Masking
+```python
+def get_advantage_mask(self, trajectory: dict) -> np.ndarray:
+    """Generate advantage mask for credit assignment.
+    
+    Determines tokens to include in advantage calculations.
+    
+    Args:
+        trajectory: Full trajectory dict
+        
+    Returns:
+        Binary mask for advantage computation
+    """
+    mask = np.zeros(len(trajectory['tokens']), dtype=bool)
+    
+    # Include decision-making tokens
+    for decision_span in trajectory['decision_spans']:
+        mask[decision_span[0]:decision_span[1]] = True
+    
+    return mask
+```
+
+## Rollout Manager Integration
+
+### Custom Rollout Manager
+```python
+from vagen.rollout import BaseRolloutManager
+
+class CustomEnvRolloutManager(BaseRolloutManager):
+    """Rollout manager for custom environment.
+    
+    Handles environment-specific observation and action processing.
+    """
+    
+    def preprocess_observation(self, obs: dict) -> dict:
+        """Preprocess environment observation for VLM."""
+        return {
+            'image': self._process_image(obs['image']),
+            'prompt': self._construct_prompt(obs)
+        }
+    
+    def postprocess_action(self, vlm_output: str) -> str:
+        """Parse VLM output to environment action."""
+        return self.env.parse_action(vlm_output)
+    
+    def _construct_prompt(self, obs: dict) -> str:
+        """Construct VLM prompt from observation."""
+        prompt_parts = [
+            "Current task:",
+            obs['text'],
+            "",
+            "Current state:",
+            obs['state_info']['current_state'],
+            "",
+            "Available actions:",
+            ", ".join(obs['state_info']['available_actions']),
+            "",
+            "Choose an action:"
+        ]
+        return "\n".join(prompt_parts)
+```
+
+## Testing VLM Integration
+
+### Integration Tests
+```python
+def test_vlm_rollout_integration():
+    """Test environment works with VLM rollout."""
+    from vagen.rollout import QwenVLRolloutManager
+    
+    env = NewEnvironment(config)
+    rollout_manager = QwenVLRolloutManager(env)
+    
+    # Collect trajectory
+    trajectory = rollout_manager.collect_trajectory(
+        max_turns=5
+    )
+    
+    # Verify trajectory structure
+    assert 'observations' in trajectory
+    assert 'actions' in trajectory
+    assert 'rewards' in trajectory
+    assert len(trajectory['actions']) > 0
+
+def test_reasoning_reward():
+    """Test visual reasoning reward calculation."""
+    env = NewEnvironment(config)
+    calculator = env.reward_calculator
+    
+    # Test exact match
+    pred = "Agent at (5, 3), box at (6, 3)"
+    actual = "Agent at (5, 3), box at (6, 3)"
+    reward = calculator.calculate_reasoning_reward(pred, actual)
+    assert reward > 0.9
+    
+    # Test partial match
+    pred = "Agent at (5, 3), box at (7, 3)"
+    reward = calculator.calculate_reasoning_reward(pred, actual)
+    assert 0.3 < reward < 0.7
+```
+
+## Performance Considerations
+
+### Efficient Observation Generation
+```python
+@lru_cache(maxsize=256)
+def _render_state(self, state_hash: int) -> np.ndarray:
+    """Cache rendered states to avoid redundant rendering."""
+    return self._render_from_hash(state_hash)
+
+def get_observation(self):
+    """Use cached rendering when possible."""
+    state_hash = hash(frozenset(self.state.items()))
+    image = self._render_state(state_hash)
+    # ... rest of observation construction
+```
+
+## Reference Implementation
+Study: @vagen/rollout/qwen_rollout/rollout_manager.py
+
+Match their:
+- Observation preprocessing
+- Action postprocessing
+- Token masking logic
+- Trajectory construction

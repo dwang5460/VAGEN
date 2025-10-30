@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
-from vagen.mllm_agent.model_interface.base_model_config import BaseModelConfig
+from vagen.inference.model_interface.base_model_config import BaseModelConfig
 
 @dataclass
 class RouterAPIModelConfig(BaseModelConfig):
@@ -41,6 +41,8 @@ class RouterAPIModelConfig(BaseModelConfig):
                 "qwen/qwen2.5-vl-3b-instruct:free",
                 "qwen/qwen2.5-vl-7b-instruct:free",
                 "qwen/qwen2.5-vl-72b-instruct:free",
+                "qwen/qwen2.5-vl-32b-instruct:free",
+                "qwen/qwen2.5-vl-32b-instruct:free"
                 # Additional models can be added here
             ],
             "default_model": "qwen/qwen2.5-vl-7b-instruct:free"

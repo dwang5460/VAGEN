@@ -1,6 +1,12 @@
 """
 Core Gymnasium Environment for Bounding Box Chart Task
-Core Gym environment - implements the standard gymnasium interface
+
+This is the core Gym environment that implements the bounding box chart task.
+It supports two modes:
+1. Synthetic chart generation for training (using _generate_chart_with_bbox)
+2. User-provided images for inference (using external image paths)
+
+The VAGEN wrapper (env.py) uses this Gym environment to handle LLM interactions.
 """
 import numpy as np
 import gymnasium as gym
@@ -38,16 +44,18 @@ class BoundingBoxChartEnv(gym.Env):
         image_width: int = 640,
         image_height: int = 480,
         normalize_coords: bool = True,
-        render_mode: Optional[str] = "rgb_array"
+        render_mode: Optional[str] = "rgb_array",
+        use_synthetic: bool = False
     ):
         """
         Initialize the environment
         
         Args:
-            image_width: Image width
-            image_height: Image height
+            image_width: Image width (used for synthetic charts)
+            image_height: Image height (used for synthetic charts)
             normalize_coords: Whether to normalize coordinates
             render_mode: Rendering mode
+            use_synthetic: If True, generate synthetic charts. If False, expect external images
         """
         super().__init__()
         
@@ -55,6 +63,7 @@ class BoundingBoxChartEnv(gym.Env):
         self.image_height = image_height
         self.normalize_coords = normalize_coords
         self.render_mode = render_mode
+        self.use_synthetic = use_synthetic
         
         # Define action space: [x_min, y_min, x_max, y_max], normalized to [0, 1]
         self.action_space = spaces.Box(
@@ -64,7 +73,7 @@ class BoundingBoxChartEnv(gym.Env):
             dtype=np.float32
         )
         
-        # Define observation space: RGB image
+        # Define observation space: RGB image (flexible size for user images)
         self.observation_space = spaces.Box(
             low=0,
             high=255,
@@ -77,6 +86,7 @@ class BoundingBoxChartEnv(gym.Env):
         self.ground_truth_bbox = None  # [x_min, y_min, x_max, y_max] normalized
         self.predicted_bbox = None
         self.np_random = None
+        self.user_image_path = None  # For tracking user-provided images
         
     def reset(
         self,
@@ -88,7 +98,7 @@ class BoundingBoxChartEnv(gym.Env):
         
         Args:
             seed: Random seed
-            options: Additional options
+            options: Additional options, can include 'image_path' for user-provided images
             
         Returns:
             observation: Initial observation (numpy array)
@@ -96,15 +106,30 @@ class BoundingBoxChartEnv(gym.Env):
         """
         super().reset(seed=seed)
         
-        # Generate new chart and ground truth bounding box
-        self.current_image, self.ground_truth_bbox = self._generate_chart_with_bbox()
+        # Check if user provided an image path
+        if options and 'image_path' in options:
+            # Load user-provided image
+            self.user_image_path = options['image_path']
+            self.current_image = self._load_user_image(self.user_image_path)
+            self.ground_truth_bbox = None  # No ground truth for user images
+        elif self.use_synthetic:
+            # Generate new chart and ground truth bounding box
+            self.current_image, self.ground_truth_bbox = self._generate_chart_with_bbox()
+        else:
+            raise ValueError(
+                "use_synthetic=False requires image_path in options. "
+                "Call reset(options={'image_path': 'path/to/image.png'})"
+            )
+        
         self.predicted_bbox = None
         
         # Convert to numpy array for observation
         obs = np.array(self.current_image, dtype=np.uint8)
         
         info = {
-            "ground_truth_bbox": self.ground_truth_bbox.copy()
+            "ground_truth_bbox": self.ground_truth_bbox.copy() if self.ground_truth_bbox else None,
+            "image_path": self.user_image_path,
+            "image_size": self.current_image.size
         }
         
         return obs, info
@@ -208,8 +233,37 @@ class BoundingBoxChartEnv(gym.Env):
     
     # ==================== Helper Methods ====================
     
+    def _load_user_image(self, image_path: str) -> Image.Image:
+        """
+        Load user-provided image from file
+        
+        Args:
+            image_path: Path to image file
+            
+        Returns:
+            PIL Image object
+            
+        Raises:
+            FileNotFoundError: If image file doesn't exist
+            ValueError: If file is not a valid image
+        """
+        import os
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"Image file not found: {image_path}")
+        
+        try:
+            image = Image.open(image_path)
+            # Convert to RGB if needed
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            return image
+        except Exception as e:
+            raise ValueError(f"Failed to load image from {image_path}: {str(e)}")
+    
     def _calculate_iou(self, bbox1: list, bbox2: list) -> float:
         """Calculate IoU"""
+        if bbox2 is None:
+            return 0.0
         x_min_inter = max(bbox1[0], bbox2[0])
         y_min_inter = max(bbox1[1], bbox2[1])
         x_max_inter = min(bbox1[2], bbox2[2])

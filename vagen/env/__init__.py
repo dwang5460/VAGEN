@@ -73,3 +73,14 @@ try:
 except ImportError:
     pass
 
+try:
+    from .bounding_box import BoundingBoxChartEnv, BoundingBoxChartEnvConfig, BoundingBoxService, BoundingBoxServiceConfig
+    REGISTERED_ENV["bounding_box"] = {
+        "env_cls": BoundingBoxChartEnv,
+        "config_cls": BoundingBoxChartEnvConfig,
+        "service_cls": BoundingBoxService,
+        "service_config_cls": BoundingBoxServiceConfig
+    }
+except ImportError:
+    pass
+

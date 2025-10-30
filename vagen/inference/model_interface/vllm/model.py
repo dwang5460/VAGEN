@@ -17,6 +17,35 @@ class VLLMModelInterface(BaseModelInterface):
     Specifically designed for Qwen models with support for both text and multimodal inputs.
     """
     
+    @staticmethod
+    def _check_vllm_multimodal_support() -> bool:
+        """
+        Check if the installed vLLM version supports multimodal parameters.
+        
+        Returns:
+            True if vLLM supports multimodal, False otherwise
+        """
+        try:
+            from vllm.engine.arg_utils import EngineArgs
+            import inspect
+            
+            # Get the signature of EngineArgs.__init__
+            sig = inspect.signature(EngineArgs.__init__)
+            params = sig.parameters
+            
+            # Check if image_input_type is a valid parameter
+            has_image_input_type = "image_input_type" in params
+            
+            if has_image_input_type:
+                logger.info("✓ vLLM multimodal support detected (image_input_type parameter available)")
+            else:
+                logger.info("✗ vLLM multimodal parameters not available in this version")
+            
+            return has_image_input_type
+        except (ImportError, AttributeError) as e:
+            logger.warning(f"Could not inspect vLLM's EngineArgs class: {e}. Assuming no multimodal support.")
+            return False
+    
     def __init__(self, config: VLLMModelConfig):
         """
         Initialize the vLLM model interface.
@@ -48,53 +77,53 @@ class VLLMModelInterface(BaseModelInterface):
         if self.is_multimodal:
             logger.info(f"Detected multimodal model: {self.model_name}. Using VLM parameters.")
             
-            # Create engine_args dict separately for VLM models
-            # Note: using engine_args dict directly instead of adding to model_kwargs
-            from vllm.engine.arg_utils import EngineArgs
+            # Check vLLM version and multimodal support first
+            multimodal_supported = self._check_vllm_multimodal_support()
             
-            # Default engine arguments
-            engine_args_dict = {
-                "model": self.model_name,
-                "tensor_parallel_size": config.tensor_parallel_size,
-                "trust_remote_code": config.trust_remote_code,
-                "enforce_eager": config.enforce_eager,
-                "gpu_memory_utilization": config.gpu_memory_utilization,
-                "dtype": config.dtype
-            }
-            
-            # Add additional args for VLM if provided in config
-            extra_vlm_args = {}
-            if config.image_input_type:
-                extra_vlm_args["image_input_type"] = config.image_input_type
-            if config.image_token_id is not None:
-                extra_vlm_args["image_token_id"] = config.image_token_id
-            if config.image_input_shape:
-                extra_vlm_args["image_input_shape"] = config.image_input_shape
-            if config.image_feature_size:
-                extra_vlm_args["image_feature_size"] = config.image_feature_size
-            
-            try:
-                # Try to create engine args with VLM-specific parameters
-                vlm_engine_args = EngineArgs(**engine_args_dict, **extra_vlm_args)
-                model_kwargs["engine_args"] = vlm_engine_args
-                logger.info("Successfully created VLM engine args with multimodal parameters")
-            except TypeError as e:
-                logger.warning(f"Failed to create VLM engine args: {e}")
-                logger.info("Trying direct initialization approach...")
+            if not multimodal_supported:
+                logger.warning(
+                    "Your vLLM version does not support multimodal parameters like 'image_input_type'. "
+                    "The model will be loaded without VLM-specific parameters. "
+                    "Consider upgrading vLLM: pip install --upgrade vllm"
+                )
+            else:
+                # Create engine_args dict separately for VLM models
+                # Note: using engine_args dict directly instead of adding to model_kwargs
+                from vllm.engine.arg_utils import EngineArgs
                 
-                # Fallback to direct parameter passing method
+                # Default engine arguments
+                engine_args_dict = {
+                    "model": self.model_name,
+                    "tensor_parallel_size": config.tensor_parallel_size,
+                    "trust_remote_code": config.trust_remote_code,
+                    "enforce_eager": config.enforce_eager,
+                    "gpu_memory_utilization": config.gpu_memory_utilization,
+                    "dtype": config.dtype
+                }
+                
+                # Add additional args for VLM if provided in config
+                extra_vlm_args = {}
+                if config.image_input_type:
+                    extra_vlm_args["image_input_type"] = config.image_input_type
+                if config.image_token_id is not None:
+                    extra_vlm_args["image_token_id"] = config.image_token_id
+                if config.image_input_shape:
+                    extra_vlm_args["image_input_shape"] = config.image_input_shape
+                if config.image_feature_size:
+                    extra_vlm_args["image_feature_size"] = config.image_feature_size
+                
                 try:
-                    # For newer vLLM versions that directly support VLM parameters
-                    model_kwargs.update(extra_vlm_args)
-                    logger.info("Using direct VLM parameters instead of engine_args")
-                except Exception as e:
-                    logger.error(f"Both VLM initialization methods failed. Running in text-only mode: {e}")
-                    # Remove all VLM-specific parameters to ensure text mode works
-                    for key in ["image_input_type", "image_token_id", "image_input_shape", "image_feature_size"]:
-                        if key in model_kwargs:
-                            del model_kwargs[key]
-                    # Mark as non-multimodal to prevent VLM-specific processing
-                    self.is_multimodal = False
+                    # Try to create engine args with VLM-specific parameters
+                    vlm_engine_args = EngineArgs(**engine_args_dict, **extra_vlm_args)
+                    model_kwargs["engine_args"] = vlm_engine_args
+                    logger.info("Successfully created VLM engine args with multimodal parameters")
+                except TypeError as e:
+                    logger.warning(f"Failed to create VLM engine args with image_input_type: {e}")
+                    logger.info("Your vLLM version may not support these parameters. Trying without them...")
+                    
+                    # Don't try direct parameter passing, just skip VLM-specific params
+                    # The model will still work, just without explicit VLM parameters
+                    logger.info("Model will be loaded without VLM-specific parameters.")
         
         # Load model
         logger.info(f"Loading {'multimodal' if self.is_multimodal else 'text'} model {self.model_name} with vLLM...")
@@ -140,26 +169,6 @@ class VLLMModelInterface(BaseModelInterface):
                 except Exception as e2:
                     logger.error(f"Failed to load model even in text-only mode: {e2}")
                     raise
-    
-    def _check_vllm_multimodal_support(self) -> bool:
-        """
-        Check if the installed vLLM version supports multimodal parameters.
-        
-        Returns:
-            True if vLLM supports multimodal, False otherwise
-        """
-        try:
-            from vllm.engine.arg_utils import EngineArgs
-            
-            # Check if EngineArgs supports multimodal parameters
-            # Create a test instance to see if image_input_type is a valid parameter
-            supported_params = set(EngineArgs.__init__.__code__.co_varnames)
-            
-            # If image_input_type is in the parameters, multimodal is supported
-            return "image_input_type" in supported_params
-        except (ImportError, AttributeError):
-            logger.warning("Could not inspect vLLM's EngineArgs class, assuming no multimodal support")
-            return False
     
     def generate(self, prompts: List[Any], **kwargs) -> List[Dict[str, Any]]:
         """
